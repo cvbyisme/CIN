@@ -1,0 +1,30 @@
+[package]
+name = "cin"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "CIN — a focused, open-source tool for talking to Android devices over adb and fastboot"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/cvbyisme/CIN"
+readme = "README.md"
+keywords = ["android", "adb", "fastboot", "flashing"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+
+[dev-dependencies]
+
+[[bin]]
+name = "cin"
+path = "src/main.rs"
+
+[lib]
+name = "cin_core"
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
