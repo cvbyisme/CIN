@@ -1,0 +1,27 @@
+/target
+core/target
+**/*.rs.bk
+*.pdb
+
+# 本地工具链缓存
+/.cin
+/toolchain
+
+# Android 构建产物
+app/.gradle
+app/build
+app/app/build
+app/local.properties
+app/.kotlin
+
+# CI 注入的原生库（由 .github/workflows/android.yml 在构建时生成）
+app/app/src/main/jniLibs
+
+# CI 构建时从 Termux 仓库拉取的 adb/fastboot 工具链（不入库）
+app/app/src/main/assets/toolchain
+
+# 编辑器
+.idea/
+.vscode/
+*.iml
+.DS_Store

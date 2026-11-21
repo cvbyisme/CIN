@@ -1,0 +1,39 @@
+[package]
+name = "cin"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.75"
+description = "CIN — a focused, open-source toolkit for talking to Android devices"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/cvbyisme/CIN"
+readme = "../README.md"
+keywords = ["android", "adb", "fastboot", "flashing"]
+categories = ["command-line-utilities"]
+
+# jni 是唯一的外部依赖，只作用于 android 目标的 cdylib。
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[features]
+# 默认构建 CLI + 核心库；android 目标额外产出 libcin.so
+default = []
+
+[[bin]]
+name = "cin"
+path = "src/main.rs"
+required-features = []
+
+[lib]
+# 注意：lib 名必须与 bin 名不同，否则 bin 里的 `use cin::...` 会解析到自身。
+# Android 侧需要的是 libcin.so，构建脚本会把 libcin_core.so 复制/重命名为 libcin.so，
+# Kotlin 侧仍然 System.loadLibrary("cin")。
+name = "cin_core"
+crate-type = ["rlib", "cdylib"]
+path = "src/lib.rs"

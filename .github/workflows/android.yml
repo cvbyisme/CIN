@@ -1,0 +1,162 @@
+name: Android
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  NDK_VERSION: "27.2.12479018"
+
+jobs:
+  build-apk:
+    name: Build debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---------- Rust 侧：交叉编译 libcin.so ----------
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+
+      # ---------- 工具链：从 Termux 仓库拉 adb/fastboot 及依赖 ----------
+      # 为什么不用 Google 的 platform-tools：它只发布 x86_64 的 PC 版本，
+      # 没有 Android 可执行文件。Termux 的 android-tools 是 AOSP 源码为
+      # Android 交叉编译的产物，许可清晰、版本可固定。详见 docs/toolchain.md。
+      - name: Fetch adb/fastboot toolchain from Termux
+        env:
+          # 国内 runner 可换成清华/中科大镜像；官方源也保留 fallback
+          TERMUX_MIRROR: ${{ vars.TERMUX_MIRROR || 'https://packages.termux.dev/apt/termux-main' }}
+        run: |
+          python3 scripts/fetch-toolchain.py \
+            --abi arm64-v8a \
+            --abi armeabi-v7a \
+            --abi x86_64 \
+            --out app/app/src/main/assets/toolchain
+
+      - name: Show toolchain summary
+        run: |
+          echo "=== 各 ABI 工具链体积 ==="
+          du -sh app/app/src/main/assets/toolchain/*/ 2>/dev/null || true
+          echo "=== 二进制 ==="
+          find app/app/src/main/assets/toolchain -name adb -o -name fastboot | while read f; do
+            printf "%s: " "$f"
+            head -c 20 "$f" | od -An -tx1 | head -1
+          done
+
+      - name: Setup Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: false
+          link-to-sdk: false
+
+      - name: Build .so for all ABIs
+        working-directory: core
+        env:
+          NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          set -eu
+          TOOLCHAIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          AR="$TOOLCHAIN/llvm-ar"; [ -x "$AR" ] || AR="$TOOLCHAIN/llvm-ar"
+          export AR
+          export RANLIB="$TOOLCHAIN/llvm-ranlib"
+
+          build_one() {
+            target="$1"; abi="$2"; minapi=29
+            case "$target" in
+              aarch64-linux-android)     cc="aarch64-linux-android${minapi}-clang" ;;
+              armv7-linux-androideabi)   cc="armv7a-linux-androideabi${minapi}-clang" ;;
+              x86_64-linux-android)      cc="x86_64-linux-android${minapi}-clang" ;;
+            esac
+            echo "==> $target ($abi) using $cc"
+            export "CC_${target//-/_}=$TOOLCHAIN/$cc"
+            export "CARGO_TARGET_$(echo "$target" | tr 'a-z-' 'A-Z_')_LINKER=$TOOLCHAIN/$cc"
+            cargo build --release --lib --target "$target"
+            dest="../app/app/src/main/jniLibs/$abi"
+            mkdir -p "$dest"
+            cp "target/$target/release/libcin_core.so" "$dest/libcin.so"
+          }
+
+          build_one aarch64-linux-android   arm64-v8a
+          build_one armv7-linux-androideabi armeabi-v7a
+          build_one x86_64-linux-android    x86_64
+
+          echo "=== produced .so files ==="
+          find ../app/app/src/main/jniLibs -name "*.so" -exec ls -l {} \;
+          echo "=== ELF headers ==="
+          for f in $(find ../app/app/src/main/jniLibs -name "*.so"); do
+            printf "%s: " "$f"; head -c 4 "$f" | od -An -tx1
+          done
+
+      # ---------- Android 侧：打包 APK ----------
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      # ---------- 正式签名 ----------
+      # 用 cvby 密钥签产物，让新包能覆盖旧版安装（debug 签名每次都不同，
+      # 会导致每次升级都要卸载、丢失 settings 与已生成的 adbkey）。
+      # secret 缺失时不报错，gradle 会自动退回默认 debug 签名。
+      - name: Restore signing keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.CIN_KEYSTORE_B64 }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::warning::CIN_KEYSTORE_B64 未设置，本次产物使用 debug 签名，无法覆盖安装"
+            exit 0
+          fi
+          mkdir -p "$RUNNER_TEMP/ks"
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/ks/cin.jks"
+          ls -l "$RUNNER_TEMP/ks/cin.jks"
+          keytool -list -keystore "$RUNNER_TEMP/ks/cin.jks"             -storepass "${{ secrets.CIN_KEYSTORE_PASSWORD }}" 2>&1 | grep -i 'SHA-256' || true
+
+      - name: Assemble debug APK
+        working-directory: app
+        env:
+          CIN_KEYSTORE: ${{ secrets.CIN_KEYSTORE_B64 != '' && format('{0}/ks/cin.jks', runner.temp) || '' }}
+          CIN_KEYSTORE_PASSWORD: ${{ secrets.CIN_KEYSTORE_PASSWORD }}
+          CIN_KEY_ALIAS: ${{ secrets.CIN_KEY_ALIAS || 'cvby' }}
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Verify APK signature
+        working-directory: app
+        run: |
+          APK=$(find app/build/outputs/apk/debug -name "*.apk" | head -1)
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          echo "=== 签名证书 ==="
+          "$BT/apksigner" verify --print-certs "$APK" || true
+
+      - name: Verify APK contents
+        working-directory: app
+        run: |
+          APK=$(find app/build/outputs/apk/debug -name "*.apk" | head -1)
+          # 校验逻辑放在 scripts/check-apk.py：
+          # 旧的 grep "lib/.*\.so" 根本看不到没有扩展名的 adb/fastboot 和
+          # manifest.txt，真的漏了也发现不了，而 Toolchain.kt 必须靠 manifest 展开。
+          python3 ../scripts/check-apk.py "$APK"
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: cin-debug-apk
+          path: app/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 30

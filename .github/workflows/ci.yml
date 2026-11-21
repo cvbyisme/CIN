@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  check:
+    name: fmt / clippy / test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          # Android 目标用于校验 JNI 层能否编译（check 阶段不需要 NDK linker）
+          targets: x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+
+      # Rust 代码位于 core/ 子目录，所有 cargo 命令都要指定工作目录
+      - name: cargo fmt
+        working-directory: core
+        run: cargo fmt --all --check
+
+      - name: cargo clippy (host)
+        working-directory: core
+        run: cargo clippy --all-targets -- -D warnings
+
+      # JNI 层只在 android 目标下编译，必须单独检查，
+      # 否则默认目标会整段跳过它，错误要到打包时才暴露。
+      - name: cargo clippy (android lib)
+        working-directory: core
+        run: cargo clippy --target x86_64-linux-android --lib -- -D warnings
+
+      - name: cargo test
+        working-directory: core
+        run: cargo test --all-targets
